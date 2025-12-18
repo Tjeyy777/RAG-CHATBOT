@@ -1,117 +1,455 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, ChangeEvent, KeyboardEvent } from "react";
 import { 
   Box, Drawer, AppBar, Toolbar, Typography, List, ListItem, ListItemButton, 
   ListItemIcon, ListItemText, TextField, IconButton, Paper, Avatar, 
-  Chip, CircularProgress, Button, Tooltip, Stack 
+  Chip, CircularProgress, Button, Tooltip, Stack, Alert, Snackbar, AlertColor
 } from "@mui/material";
 import { 
   Send as SendIcon, Description as FileIcon, 
   Image as ImageIcon, SmartToy as RobotIcon, Person as UserIcon,
   CloudUpload as UploadIcon, Delete as DeleteIcon, Logout as LogoutIcon,
-  FiberManualRecord as DotIcon
+  FiberManualRecord as DotIcon, Article as ArticleIcon, InsertDriveFile as DocIcon
 } from "@mui/icons-material";
 import { apiFetch } from "../api";
 
+// ============================================
+// TYPE DEFINITIONS
+// ============================================
+
+interface Asset {
+  id: number;
+  filename: string;
+  type: 'image' | 'document' | 'pdf' | 'text';
+  file_path: string;
+  uploaded_at: string;
+}
+
+interface Message {
+  role: 'user' | 'ai';
+  text: string;
+  sources?: Source[];
+}
+
+interface Source {
+  filename: string;
+  page?: number;
+}
+
+interface SnackbarState {
+  open: boolean;
+  message: string;
+  severity: AlertColor;
+}
+
+interface ValidationResult {
+  valid: boolean;
+  error?: string;
+}
+
+interface ChatResponse {
+  answer: string;
+  sources?: Source[];
+}
+
+interface ErrorResponse {
+  detail?: string;
+}
+
+// ============================================
+// CONSTANTS
+// ============================================
+
 const drawerWidth = 280;
 
-export default function Dashboard() {
-  const [assets, setAssets] = useState<any[]>([]);
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [messages, setMessages] = useState<any[]>([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+const ALLOWED_FILE_TYPES: Record<string, string> = {
+  'application/pdf': 'PDF',
+  'text/plain': 'TXT',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+  'image/png': 'PNG',
+  'image/jpeg': 'JPEG',
+  'image/jpg': 'JPG'
+};
 
-  // Load assets on mount
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+const getFileIcon = (filename: string, type: string): React.ReactElement => {
+  const ext = filename.split('.').pop()?.toLowerCase();
+  
+  if (type === 'image' || ['png', 'jpg', 'jpeg'].includes(ext || '')) {
+    return <ImageIcon sx={{ fontSize: 20, color: '#10b981' }} />;
+  }
+  if (ext === 'pdf') {
+    return <FileIcon sx={{ fontSize: 20, color: '#ef4444' }} />;
+  }
+  if (ext === 'docx') {
+    return <DocIcon sx={{ fontSize: 20, color: '#3b82f6' }} />;
+  }
+  if (ext === 'txt') {
+    return <ArticleIcon sx={{ fontSize: 20, color: '#f59e0b' }} />;
+  }
+  
+  return <FileIcon sx={{ fontSize: 20, color: '#666' }} />;
+};
+
+// ============================================
+// MAIN COMPONENT
+// ============================================
+
+export default function Dashboard(): React.ReactElement {
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(false);
+  const [uploading, setUploading] = useState<boolean>(false);
+  const [snackbar, setSnackbar] = useState<SnackbarState>({ 
+    open: false, 
+    message: '', 
+    severity: 'info' 
+  });
+  
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ============================================
+  // EFFECTS
+  // ============================================
+
   useEffect(() => { 
     loadAssets(); 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-scroll chat to bottom
   useEffect(() => { 
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
 
-  const loadAssets = async () => {
-    const res = await apiFetch("/assets/");
-    if (res.ok) setAssets(await res.json());
+  // ============================================
+  // UTILITY FUNCTIONS
+  // ============================================
+
+  const showSnackbar = (message: string, severity: AlertColor = 'info'): void => {
+    setSnackbar({ open: true, message, severity });
   };
 
-  const handleUpload = async (e: any) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  const handleCloseSnackbar = (): void => {
+    setSnackbar(prev => ({ ...prev, open: false }));
+  };
+
+  const validateFile = (file: File | null): ValidationResult => {
+    if (!file) {
+      return { valid: false, error: "No file selected" };
+    }
+
+    if (!ALLOWED_FILE_TYPES[file.type]) {
+      const allowedTypes = Object.values(ALLOWED_FILE_TYPES).join(', ');
+      return { 
+        valid: false, 
+        error: `Invalid file type "${file.type}". Allowed: ${allowedTypes}` 
+      };
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      const sizeMB = (MAX_FILE_SIZE / (1024 * 1024)).toFixed(0);
+      return { 
+        valid: false, 
+        error: `File too large (${(file.size / (1024 * 1024)).toFixed(2)}MB). Maximum: ${sizeMB}MB` 
+      };
+    }
+
+    if (file.size === 0) {
+      return { valid: false, error: "File is empty" };
+    }
+
+    return { valid: true };
+  };
+
+  // ============================================
+  // API FUNCTIONS
+  // ============================================
+
+  const loadAssets = async (): Promise<void> => {
+    try {
+      const res = await apiFetch("/assets/");
+      
+      if (res.status === 401) {
+        showSnackbar("Session expired. Please login again.", 'error');
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Failed to load assets: ${res.status}`);
+      }
+
+      const data: Asset[] = await res.json();
+      setAssets(data);
+    } catch (error) {
+      console.error('Error loading assets:', error);
+      showSnackbar("Failed to load files. Please refresh the page.", 'error');
+    }
+  };
+
+  const handleUpload = async (e: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0] || null;
+    
+    const validation = validateFile(file);
+    if (!validation.valid) {
+      showSnackbar(validation.error || "Invalid file", 'error');
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      return;
+    }
+
     setUploading(true);
     
-    const form = new FormData();
-    form.append("file", file);
-    
-    const res = await fetch("http://localhost:8000/assets/upload/", {
+    try {
+      const form = new FormData();
+      form.append("file", file!);
+      
+      const token = localStorage.getItem("token");
+      if (!token) {
+        showSnackbar("Authentication required. Please login.", 'error');
+        handleLogout();
+        return;
+      }
+
+      const res = await fetch("http://localhost:8000/assets/upload/", {
         method: "POST",
         headers: { 
-            "Authorization": `Bearer ${localStorage.getItem("token")}` 
+          "Authorization": `Bearer ${token}` 
         },
         body: form
-    });
-    
-    if (res.status === 401) {
-        alert("Session expired. Please login again.");
+      });
+
+      if (res.status === 401) {
+        showSnackbar("Session expired. Please login again.", 'error');
         handleLogout();
-    }
+        return;
+      }
 
-    setUploading(false);
-    loadAssets();
+      if (res.status === 413) {
+        showSnackbar("File too large for server. Try a smaller file.", 'error');
+        return;
+      }
+
+      if (res.status === 415) {
+        showSnackbar("Unsupported file type.", 'error');
+        return;
+      }
+
+      if (res.status === 400) {
+        const errorData: ErrorResponse = await res.json().catch(() => ({}));
+        showSnackbar(errorData.detail || "Invalid file format or corrupted file.", 'error');
+        return;
+      }
+
+      if (res.status === 500) {
+        showSnackbar("Server error during file processing. Please try again.", 'error');
+        return;
+      }
+
+      if (!res.ok) {
+        const errorData: ErrorResponse = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Upload failed with status ${res.status}`);
+      }
+
+      const fileType = ALLOWED_FILE_TYPES[file!.type];
+      showSnackbar(`${fileType} file "${file!.name}" uploaded successfully!`, 'success');
+      await loadAssets();
+      
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        showSnackbar("Network error. Please check your connection.", 'error');
+      } else if (error instanceof Error) {
+        showSnackbar(error.message || "Upload failed. Please try again.", 'error');
+      }
+    } finally {
+      setUploading(false);
+    }
   };
 
-  const handleDeleteAsset = async (id: number) => {
-    if (!window.confirm("Delete this file?")) return;
-    const res = await apiFetch(`/assets/${id}/`, { method: "DELETE" });
-    if (res.ok) {
-        setSelectedIds(prev => prev.filter(i => i !== id));
-        loadAssets();
+  const handleDeleteAsset = async (id: number): Promise<void> => {
+    if (!window.confirm("Delete this file? This action cannot be undone.")) return;
+    
+    try {
+      const res = await apiFetch(`/assets/${id}/`, { method: "DELETE" });
+      
+      if (res.status === 401) {
+        showSnackbar("Session expired. Please login again.", 'error');
+        handleLogout();
+        return;
+      }
+
+      if (res.status === 404) {
+        showSnackbar("File not found. It may have been already deleted.", 'warning');
+        await loadAssets();
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Delete failed with status ${res.status}`);
+      }
+
+      setSelectedIds(prev => prev.filter(i => i !== id));
+      showSnackbar("File deleted successfully", 'success');
+      await loadAssets();
+    } catch (error) {
+      console.error('Delete error:', error);
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        showSnackbar("Network error. Please check your connection.", 'error');
+      } else {
+        showSnackbar("Failed to delete file. Please try again.", 'error');
+      }
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = (): void => {
     localStorage.removeItem("token");
-    window.location.reload();
+    window.location.href = "/login";
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg = input;
+  const handleSend = async (): Promise<void> => {
+    // Validation: Check if message is not empty
+    if (!input.trim()) {
+      showSnackbar("Please enter a message", 'warning');
+      return;
+    }
+
+    // Prevent multiple simultaneous requests
+    if (loading) return;
+
+    const userMsg = input.trim();
     setInput("");
     setLoading(true);
-
     setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
 
     try {
-        const res = await apiFetch("/api/chat/", { 
-            method: "POST", 
-            body: JSON.stringify({ question: userMsg, asset_ids: selectedIds }) 
-        });
-        
-        const data = await res.json();
+      const token = localStorage.getItem("token");
+      if (!token) {
+        showSnackbar("Authentication required. Please login.", 'error');
+        handleLogout();
+        return;
+      }
+
+      const res = await apiFetch("/api/chat/", {
+        method: "POST",
+        body: JSON.stringify({
+          question: userMsg,
+          asset_ids: selectedIds.length > 0 ? selectedIds : undefined
+        })
+      });
+
+      if (res.status === 401) {
+        showSnackbar("Session expired. Please login again.", 'error');
+        handleLogout();
         setMessages(prev => [...prev, { 
-            role: 'ai', 
-            text: data.answer, 
-            sources: data.sources || [] 
+          role: 'ai', 
+          text: "Session expired. Please login again." 
         }]);
-    } catch (err) {
-        setMessages(prev => [...prev, { role: 'ai', text: "Error connecting to server." }]);
+        return;
+      }
+
+      if (res.status === 400) {
+        const errorData: ErrorResponse = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Invalid request");
+      }
+
+      if (res.status === 404) {
+        throw new Error("One or more selected files not found. Please refresh and try again.");
+      }
+
+      if (res.status === 500) {
+        throw new Error("Server error. Please try again later.");
+      }
+
+      if (!res.ok) {
+        throw new Error(`Request failed with status ${res.status}`);
+      }
+
+      const data: ChatResponse = await res.json();
+      
+      if (!data.answer) {
+        throw new Error("Invalid response from server");
+      }
+
+      setMessages(prev => [...prev, {
+        role: 'ai',
+        text: data.answer,
+        sources: data.sources || []
+      }]);
+    } catch (error) {
+      console.error('Chat error:', error);
+      
+      let errorMessage = "Error connecting to server.";
+      
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        errorMessage = "Network error. Please check your connection and try again.";
+      } else if (error instanceof Error && error.message) {
+        errorMessage = error.message;
+      }
+
+      setMessages(prev => [...prev, {
+        role: 'ai',
+        text: errorMessage
+      }]);
+      
+      showSnackbar(errorMessage, 'error');
     } finally {
-        setLoading(false);
+      setLoading(false);
     }
   };
 
-  const toggleSelect = (id: number) => {
-    setSelectedIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
+  // ============================================
+  // EVENT HANDLERS
+  // ============================================
+
+  const toggleSelect = (id: number): void => {
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
   };
+
+  const handleKeyPress = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // ============================================
+  // RENDER
+  // ============================================
 
   return (
     <Box sx={{ display: 'flex', height: '100vh', bgcolor: '#0a0a0a' }}>
+      {/* Snackbar for notifications */}
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={6000}
+        onClose={handleCloseSnackbar}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+      >
+        <Alert
+          onClose={handleCloseSnackbar}
+          severity={snackbar.severity}
+          sx={{ width: '100%' }}
+          variant="filled"
+        >
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
       
       {/* SIDEBAR: Knowledge Base */}
       <Drawer
@@ -151,36 +489,46 @@ export default function Dashboard() {
             </Tooltip>
           </Box>
 
-          <Button 
-            fullWidth 
-            variant="contained" 
-            component="label" 
-            startIcon={<UploadIcon />} 
+          <input
+            ref={fileInputRef}
+            type="file"
+            hidden
+            id="file-upload"
+            onChange={handleUpload}
+            accept=".pdf,.txt,.docx,.png,.jpg,.jpeg"
             disabled={uploading}
-            sx={{ 
-              bgcolor: '#3b82f6', 
-              color: '#fff',
-              textTransform: 'none',
-              fontWeight: 600,
-              py: 1.25,
-              borderRadius: 2,
-              boxShadow: '0 4px 14px 0 rgba(59, 130, 246, 0.4)',
-              border: 'none',
-              transition: 'all 0.3s ease',
-              '&:hover': { 
-                bgcolor: '#2563eb',
-                boxShadow: '0 6px 20px 0 rgba(59, 130, 246, 0.6)',
-                transform: 'translateY(-2px)'
-              },
-              '&:disabled': {
-                bgcolor: '#1f1f1f',
-                color: '#555'
-              }
-            }}
-          >
-            {uploading ? "Processing..." : "Upload File"}
-            <input type="file" hidden onChange={handleUpload} />
-          </Button>
+          />
+          <label htmlFor="file-upload">
+            <Button 
+              fullWidth 
+              component="span"
+              startIcon={<UploadIcon />} 
+              disabled={uploading}
+              sx={{ 
+                bgcolor: '#3b82f6', 
+                color: '#fff',
+                textTransform: 'none',
+                fontWeight: 600,
+                py: 1.25,
+                borderRadius: 2,
+                boxShadow: '0 4px 14px 0 rgba(59, 130, 246, 0.4)',
+                border: 'none',
+                transition: 'all 0.3s ease',
+                '&:hover': { 
+                  bgcolor: '#2563eb',
+                  boxShadow: '0 6px 20px 0 rgba(59, 130, 246, 0.6)',
+                  transform: 'translateY(-2px)'
+                },
+                '&:disabled': {
+                  bgcolor: '#1f1f1f',
+                  color: '#555'
+                }
+              }}
+            >
+              {uploading ? "Processing..." : "Upload File"}
+            </Button>
+          </label>
+          
           {uploading && (
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mt: 2 }}>
               <CircularProgress size={20} sx={{ color: '#3b82f6' }} />
@@ -189,6 +537,19 @@ export default function Dashboard() {
               </Typography>
             </Box>
           )}
+
+          <Box sx={{ mt: 2, p: 1.5, bgcolor: '#1a1a1a', borderRadius: 2 }}>
+            <Typography variant="caption" sx={{ color: '#888', display: 'block', mb: 1 }}>
+              Supported formats:
+            </Typography>
+            <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+              <Chip label="PDF" size="small" sx={{ bgcolor: '#0f0f0f', color: '#ef4444', fontSize: '0.7rem' }} />
+              <Chip label="TXT" size="small" sx={{ bgcolor: '#0f0f0f', color: '#f59e0b', fontSize: '0.7rem' }} />
+              <Chip label="DOCX" size="small" sx={{ bgcolor: '#0f0f0f', color: '#3b82f6', fontSize: '0.7rem' }} />
+              <Chip label="PNG" size="small" sx={{ bgcolor: '#0f0f0f', color: '#10b981', fontSize: '0.7rem' }} />
+              <Chip label="JPG" size="small" sx={{ bgcolor: '#0f0f0f', color: '#10b981', fontSize: '0.7rem' }} />
+            </Stack>
+          </Box>
         </Box>
 
         <Box sx={{ px: 2, py: 1.5, bgcolor: '#0a0a0a', borderBottom: '1px solid #1f1f1f' }}>
@@ -209,7 +570,7 @@ export default function Dashboard() {
               </Typography>
             </Box>
           ) : (
-            assets.map((asset) => (
+            assets.map((asset: Asset) => (
               <ListItem 
                 key={asset.id} 
                 disablePadding
@@ -232,19 +593,7 @@ export default function Dashboard() {
                   }}
                 >
                   <ListItemIcon sx={{ minWidth: 36 }}>
-                    {asset.type === 'image' ? (
-                      <ImageIcon sx={{ 
-                        fontSize: 20, 
-                        color: selectedIds.includes(asset.id) ? '#3b82f6' : '#666',
-                        transition: 'color 0.3s ease'
-                      }} />
-                    ) : (
-                      <FileIcon sx={{ 
-                        fontSize: 20, 
-                        color: selectedIds.includes(asset.id) ? '#3b82f6' : '#666',
-                        transition: 'color 0.3s ease'
-                      }} />
-                    )}
+                    {getFileIcon(asset.filename, asset.type)}
                   </ListItemIcon>
                   <ListItemText 
                     primary={asset.filename} 
@@ -255,25 +604,27 @@ export default function Dashboard() {
                       color: selectedIds.includes(asset.id) ? '#fff' : '#999'
                     }}
                   />
-                  <IconButton 
-                    edge="end" 
-                    size="small"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteAsset(asset.id);
-                    }}
-                    sx={{ 
-                      color: '#555',
-                      transition: 'all 0.3s ease',
-                      '&:hover': { 
-                        color: '#ef4444',
-                        bgcolor: 'rgba(239, 68, 68, 0.1)',
-                        transform: 'scale(1.1)'
-                      }
-                    }}
-                  >
-                    <DeleteIcon fontSize="small" />
-                  </IconButton>
+                  <Tooltip title="Delete file">
+                    <IconButton 
+                      edge="end" 
+                      size="small"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteAsset(asset.id);
+                      }}
+                      sx={{ 
+                        color: '#555',
+                        transition: 'all 0.3s ease',
+                        '&:hover': { 
+                          color: '#ef4444',
+                          bgcolor: 'rgba(239, 68, 68, 0.1)',
+                          transform: 'scale(1.1)'
+                        }
+                      }}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                 </ListItemButton>
               </ListItem>
             ))
@@ -372,12 +723,12 @@ export default function Dashboard() {
                 Ready to assist
               </Typography>
               <Typography variant="body2" sx={{ color: '#888', textAlign: 'center', maxWidth: 400 }}>
-                Select documents from your knowledge base and ask me anything. I'll provide answers based on your files.
+                Upload documents to your knowledge base or start chatting directly with the AI assistant.
               </Typography>
             </Box>
           )}
 
-          {messages.map((msg, i) => (
+          {messages.map((msg: Message, i: number) => (
             <Box 
               key={i} 
               sx={{ 
@@ -452,7 +803,7 @@ export default function Dashboard() {
                       📎 Sources
                     </Typography>
                     <Stack direction="row" flexWrap="wrap" gap={0.75}>
-                      {msg.sources.map((s: any, idx: number) => (
+                      {msg.sources.map((s: Source, idx: number) => (
                         <Chip 
                           key={idx} 
                           label={s.filename} 
@@ -537,10 +888,11 @@ export default function Dashboard() {
               placeholder="Ask me anything..." 
               variant="outlined"
               value={input} 
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setInput(e.target.value)}
+              onKeyPress={handleKeyPress}
               multiline
               maxRows={4}
+              disabled={loading}
               sx={{ 
                 '& .MuiOutlinedInput-root': { 
                   bgcolor: '#1a1a1a',
@@ -567,22 +919,22 @@ export default function Dashboard() {
               disabled={!input.trim() || loading} 
               onClick={handleSend}
               sx={{ 
-                background: input.trim() && !loading 
+                background: input.trim() && !loading
                   ? 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)' 
                   : '#1a1a1a',
                 color: '#fff',
                 width: 48,
                 height: 48,
-                boxShadow: input.trim() && !loading 
+                boxShadow: input.trim() && !loading
                   ? '0 4px 14px 0 rgba(59, 130, 246, 0.4)' 
                   : 'none',
                 transition: 'all 0.3s ease',
                 '&:hover': { 
-                  background: input.trim() && !loading 
+                  background: input.trim() && !loading
                     ? 'linear-gradient(135deg, #2563eb 0%, #7c3aed 100%)' 
                     : '#1a1a1a',
                   transform: input.trim() && !loading ? 'scale(1.05)' : 'none',
-                  boxShadow: input.trim() && !loading 
+                  boxShadow: input.trim() && !loading
                     ? '0 6px 20px 0 rgba(59, 130, 246, 0.6)' 
                     : 'none'
                 },
