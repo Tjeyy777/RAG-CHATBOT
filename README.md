@@ -3,7 +3,7 @@
 A high-performance "Chat with your files" application. This platform allows users to upload documents (PDF, TXT, DOCX) and images (PNG, JPG), store them in cloud object storage, and interact with an AI assistant that provides answers **strictly grounded** in the uploaded content.
 
 ## 📺 Project Demo
-> **[Link to Demo Video]** *(Update this with your Loom/Drive link)*
+> **[https://drive.google.com/file/d/1nUNTmz-U1AzGm1k6wNAZQeB0CiSNjceK/view?usp=sharing]** *(Update this with your Loom/Drive link)*
 
 ---
 
