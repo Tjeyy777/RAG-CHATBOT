@@ -54,7 +54,7 @@ A high-performance "Chat with your files" application. This platform allows user
 
 
 ## 🏗️ System Architecture
-![Project Architecture](./architecture.svg)
+![Project Architecture](./archtecture.svg)
 
 ---
 
