@@ -1,4 +1,4 @@
-# 📁 Multimodal File-Chat RAG Chatbot
+# 📁 Multimodal RAG Chatbot
 
 A high-performance "Chat with your files" application. This platform allows users to upload documents (PDF, TXT, DOCX) and images (PNG, JPG), store them in cloud object storage, and interact with an AI assistant that provides answers **strictly grounded** in the uploaded content.
 
